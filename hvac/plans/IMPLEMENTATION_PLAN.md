@@ -43,7 +43,7 @@
 
 Add `inject_anomaly_amplitude()` method to `HVACDataGenerator`:
 - Takes a `scale_factor` param (e.g., 0.3 = 30% of normal range)
-- For the anomaly window: compute rolling mean, then scale deviations from mean by `scale_factor`
+- For the anomaly window: scale deviations from base_temp by `scale_factor` and add back to base_temp
 - Apply to ALL 3 units in a container (this is what makes it a "global" anomaly)
 
 Modify `generate_container_data()` to support `amplitude` type in the anomaly config, applying it to all units.

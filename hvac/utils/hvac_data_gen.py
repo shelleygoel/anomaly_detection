@@ -27,7 +27,7 @@ class HVACDataGenerator:
         self.base_temp = 50  # Base temperature
         self.temp_range = 15  # Temperature variation range
         self.charge_cycle_hours = 4  # Hours per charge cycle
-        self.noise_std = 0.1  # Standard deviation of noise
+        self.noise_std = 0.01  # Standard deviation of noise
         
     def _generate_cycle_timings(self,
                                 duration_days: int,
@@ -446,7 +446,7 @@ class HVACDataGenerator:
     
     def generate_dataset(self,
                         num_containers: int,
-                        start_date: str,
+                        start_time: datetime,
                         duration_days: int,
                         anomaly_probability: float = 0.2,
                         anomaly_configs: Dict[int, List[Dict]] = None) -> pd.DataFrame:
@@ -463,14 +463,13 @@ class HVACDataGenerator:
         Returns:
             Complete DataFrame with all containers
         """
-        start_time = datetime.strptime(start_date, '%Y-%m-%d')
         all_containers = []
         
         for container_id in range(num_containers):
             # Use provided config or generate random anomalies
             if anomaly_configs and container_id in anomaly_configs:
                 config = anomaly_configs[container_id]
-            elif random.random() < anomaly_probability:
+            elif random.uniform(0, 1) < anomaly_probability:
                 # Generate random anomaly
                 config = self._generate_random_anomaly_config(duration_days)
             else:
@@ -491,13 +490,13 @@ class HVACDataGenerator:
             'type': anom_type,
             'start_day': random.randint(1, max(1, duration_days - 2)),
             'start_hour': random.randint(0, 23),
-            'duration_hours': random.randint(2, 12),
+            'duration_hours': 24*random.randint(2, 3),
         }
 
         if anom_type == 'lag':
-            base['params'] = {'lag_minutes': random.randint(20, 60)}
+            base['params'] = {'lag_minutes': 60*random.randint(1, 3)}
         elif anom_type == 'frequency':
-            base['params'] = {'frequency_multiplier': random.choice([0.5, 1.5, 2.0])}
+            base['params'] = {'frequency_multiplier': random.choice([0.2,0.4, 1.2, 2])}
         elif anom_type == 'amplitude':
             base['params'] = {'scale_factor': random.uniform(0.2, 0.4)}
 
