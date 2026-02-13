@@ -39,7 +39,7 @@
 
 ## Implementation Plan
 
-### Step 1: Add amplitude anomaly to `hvac_data_gen.py`
+### Step 1: Add amplitude anomaly to `hvac_data_gen.py` - DONE
 
 Add `inject_anomaly_amplitude()` method to `HVACDataGenerator`:
 - Takes a `scale_factor` param (e.g., 0.3 = 30% of normal range)
@@ -52,19 +52,19 @@ Also update `_generate_random_anomaly_config()` to include amplitude as a possib
 
 **File:** `anomaly_detection/hvac/hvac_data_gen.py`
 
-### Step 2: Generate a synthethic dataset
+### Step 2: Generate a synthethic dataset - DONE
 Use `HVADataGenerator` to generate a synthetic dataset of 10 containers across 2 weeks which is injected with anomalies of all three types.
  5% unit-days for each anomaly type. (A unit-day is data of a single HVAC unit for a day)
 Store the data in `hvac/datasets` folder.   
 
-### Step 3: Create Data Visulization helper methods in `hvac/utils/visual.py`
+### Step 3: Create Data Visulization helper methods in `hvac/utils/visual.py` - DONE
 - Method to visualize % of total unit-days grouped by anomaly types.
 - Method to visualize TempRet of a container across multiple days - colored by HVAC unit 
 - TODO: Plan more methods for visualizing flagged anomalies per container 
 
 **File:** `anomaly_detection/hvac/01_model_selection_workflow.ipynb`
 
-#### Section 1: Setup & Data Generation
+#### Section 1: Setup & Data Generation - DONE
 - Imports (hvac_data_gen, TSB-AD, plotly/matplotlib, numpy, pandas)
 - Load and visualize synthetic dataset
 - Use Visualization helper methods from `hvac/utils/visual.py`
