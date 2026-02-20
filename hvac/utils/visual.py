@@ -1,6 +1,7 @@
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
+from plotly.subplots import make_subplots
 
 
 def plot_container_anomaly_timeseries(hvac_df, anomaly_type="amplitude", num_containers=1):
@@ -22,8 +23,6 @@ def plot_container_anomaly_timeseries(hvac_df, anomaly_type="amplitude", num_con
 
     # Create subplots if multiple containers
     if num_containers > 1:
-        from plotly.subplots import make_subplots
-
         # Create color mapping for units (uniform across containers)
         all_units = sorted(hvac_df["unit"].unique())
         colors = px.colors.qualitative.Plotly
@@ -173,6 +172,123 @@ def plot_container_anomaly_timeseries(hvac_df, anomaly_type="amplitude", num_con
             hovermode="x unified",
             height=500,
         )
+
+    return fig
+
+
+def plot_flagged_vs_true(hvac_df, scores_df, anomaly_type, num_containers=2):
+    """
+    Compare model-flagged anomalies against ground-truth labels for sampled containers.
+
+    Samples containers that were flagged by the algorithm for the given anomaly type,
+    then plots raw temperatures with true labels and shaded day-level flags.
+
+    Parameters:
+    - hvac_df: raw HVAC dataset (columns: timestamp_et, container_id, unit, TmpRet, anomaly, anomaly_type)
+    - scores_df: output of flag_anomalies() (columns: container_id, day, unit, anomaly_score, anomaly_flag, model)
+    - anomaly_type: one of "lag", "frequency", "amplitude"
+    - num_containers: how many containers to sample (default 2)
+
+    Returns: Plotly figure
+    """
+    import datetime
+
+    unit_colors = {0: '#5470C6', 1: '#EE6666', 2: '#5DBCD2'}
+
+    # Containers flagged by the model
+    flagged_containers = scores_df[scores_df["anomaly_flag"]]["container_id"].unique()
+    # Containers with this anomaly type in ground truth
+    type_containers = hvac_df[hvac_df["anomaly_type"] == anomaly_type]["container_id"].unique()
+
+    # Intersect: flagged AND have this anomaly type
+    candidates = np.intersect1d(flagged_containers, type_containers)
+
+    if len(candidates) == 0:
+        print(f"No containers flagged for anomaly type '{anomaly_type}'. Showing unflagged samples.")
+        candidates = type_containers
+
+    n = min(num_containers, len(candidates))
+    sampled = np.random.choice(candidates, size=n, replace=False)
+
+    # Build subplot titles with flagged unit info
+    titles = []
+    for cid in sampled:
+        cid_flags = scores_df[
+            (scores_df["container_id"] == cid) & scores_df["anomaly_flag"]
+        ]
+        flagged_units = sorted(cid_flags["unit"].unique())
+        unit_str = ", ".join(str(u) for u in flagged_units) if len(flagged_units) > 0 else "none"
+        titles.append(f"Container {cid} — {anomaly_type} | flagged unit(s): {unit_str}")
+
+    fig = make_subplots(
+        rows=n, cols=1,
+        subplot_titles=titles,
+        specs=[[{"secondary_y": True}] for _ in range(n)],
+        vertical_spacing=0.15,
+    )
+
+    for row_idx, cid in enumerate(sampled, start=1):
+        show_legend = True
+        df_c = hvac_df[hvac_df["container_id"] == cid].sort_values("timestamp_et")
+        sf_c = scores_df[scores_df["container_id"] == cid]
+
+        for unit in sorted(df_c["unit"].unique()):
+            color = unit_colors.get(unit, '#999999')
+            ud = df_c[df_c["unit"] == unit]
+
+            # Raw temperature lines
+            fig.add_trace(
+                go.Scatter(
+                    x=ud["timestamp_et"], y=ud["TmpRet"],
+                    name=f"Unit {unit}", mode="lines",
+                    line=dict(color=color),
+                    legendgroup=f"c{cid}",
+                    showlegend=show_legend,
+                ),
+                row=row_idx, col=1, secondary_y=False,
+            )
+
+            # True labels (circle markers)
+            true_pts = ud[ud["anomaly"]]
+            if len(true_pts) > 0:
+                fig.add_trace(
+                    go.Scatter(
+                        x=true_pts["timestamp_et"],
+                        y=true_pts["anomaly"].astype(int),
+                        name=f"True — Unit {unit}", mode="markers",
+                        marker=dict(symbol="circle", size=5, color='green'),
+                        legendgroup=f"c{cid}",
+                        showlegend=show_legend,
+                    ),
+                    row=row_idx, col=1, secondary_y=True,
+                )
+
+        # Shade flagged days per unit
+        flagged_days = sf_c[sf_c["anomaly_flag"]]
+        for _, row in flagged_days.iterrows():
+            day = row["day"]
+            unit = row["unit"]
+            color = unit_colors.get(unit, '#999999')
+            day_start = datetime.datetime.combine(day, datetime.time.min)
+            day_end = datetime.datetime.combine(day, datetime.time.max)
+            fig.add_vrect(
+                x0=day_start, x1=day_end,
+                fillcolor=color, opacity=0.15,
+                line_width=0,
+                row=row_idx, col=1,
+            )
+
+    for row_idx in range(1, n + 1):
+        fig.update_yaxes(title_text="Temperature (TmpRet)", row=row_idx, secondary_y=False)
+        fig.update_yaxes(title_text="Anomaly", row=row_idx, secondary_y=True, range=[-0.1, 1.1])
+        fig.update_xaxes(title_text="Timestamp", row=row_idx)
+
+    fig.update_layout(
+        title_text=f"Euclidean Distance Flagging — {anomaly_type.capitalize()} Anomaly",
+        hovermode="x unified",
+        height=350 * n,
+        width=1200,
+    )
 
     return fig
 
