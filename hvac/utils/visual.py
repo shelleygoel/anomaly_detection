@@ -35,7 +35,7 @@ def plot_container_anomaly_timeseries(hvac_df, anomaly_type="amplitude", num_con
             cols=1,
             subplot_titles=[f"Container {cid}" for cid in sampled_containers],
             specs=[[{"secondary_y": True}] for _ in range(num_containers)],
-            vertical_spacing=0.12,
+            vertical_spacing=0.1,
         )
 
         for row_idx, container_id in enumerate(sampled_containers, start=1):
@@ -170,8 +170,9 @@ def plot_container_anomaly_timeseries(hvac_df, anomaly_type="amplitude", num_con
             yaxis=dict(title="Temperature (TmpRet)", side="left"),
             yaxis2=dict(title="Anomaly Flag", side="right", overlaying="y", range=[-0.1, 1.1]),
             hovermode="x unified",
-            height=500,
+            height=300,
         )
+        
 
     return fig
 
@@ -295,34 +296,62 @@ def plot_flagged_vs_true(hvac_df, scores_df, anomaly_type, num_containers=2):
 
 def plot_anomaly_type_distribution(hvac_df):
     """
-    Visualize percentage of total unit-days grouped by anomaly types.
+    Visualize percentage of total container-days and container unit-days grouped by anomaly types.
 
     Parameters:
     - hvac_df: DataFrame with HVAC data
 
-    Returns: Plotly figure
+    Returns: Plotly figure with two pie charts side by side
     """
-    # Count unique unit-days per anomaly type
-    anomaly_unitdays = hvac_df.groupby("anomaly_type")["cont_unit_day"].nunique().reset_index()
+    # Create a container-day identifier (container_id + date from timestamp_et)
+    df_copy = hvac_df.copy()
+    df_copy["container_day"] = df_copy["container_id"].astype(str) + "_" + df_copy["timestamp_et"].dt.date.astype(str)
+
+    # Count unique container-days per anomaly type
+    anomaly_containerdays = df_copy.groupby("anomaly_type")["container_day"].nunique().reset_index()
+    anomaly_containerdays.columns = ["anomaly_type", "container_days"]
+
+    # Count unique container unit-days per anomaly type
+    anomaly_unitdays = df_copy.groupby("anomaly_type")["cont_unit_day"].nunique().reset_index()
     anomaly_unitdays.columns = ["anomaly_type", "unit_days"]
 
-    # Calculate percentage
-    total_unitdays = anomaly_unitdays["unit_days"].sum()
-    anomaly_unitdays["percentage"] = (anomaly_unitdays["unit_days"] / total_unitdays * 100).round(2)
-
-    # Create pie chart
-    fig = px.pie(
-        anomaly_unitdays,
-        values="unit_days",
-        names="anomaly_type",
-        title="Distribution of Unit-Days by Anomaly Type",
-        labels={"unit_days": "Unit-Days", "anomaly_type": "Anomaly Type"},
+    # Create subplots with two pie charts
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        specs=[[{"type": "pie"}, {"type": "pie"}]],
+        subplot_titles=("Container-Days", "Unit-Days"),
     )
 
-    # Add percentages to labels
-    fig.update_traces(
-        textinfo="label+percent",
-        hovertemplate="<b>%{label}</b><br>Unit-Days: %{value}<br>Percentage: %{percent}<extra></extra>",
+    # Add container-days pie chart
+    fig.add_trace(
+        go.Pie(
+            labels=anomaly_containerdays["anomaly_type"],
+            values=anomaly_containerdays["container_days"],
+            name="Container-Days",
+            textinfo="label+percent",
+            hovertemplate="<b>%{label}</b><br>Container-Days: %{value}<br>Percentage: %{percent}<extra></extra>",
+        ),
+        row=1,
+        col=1,
+    )
+
+    # Add unit-days pie chart
+    fig.add_trace(
+        go.Pie(
+            labels=anomaly_unitdays["anomaly_type"],
+            values=anomaly_unitdays["unit_days"],
+            name="Unit-Days",
+            textinfo="label+percent",
+            hovertemplate="<b>%{label}</b><br>Unit-Days: %{value}<br>Percentage: %{percent}<extra></extra>",
+        ),
+        row=1,
+        col=2,
+    )
+
+    fig.update_layout(
+        title_text="Distribution of Anomaly Types by Container-Days and Unit-Days",
+        height=500,
     )
 
     return fig
