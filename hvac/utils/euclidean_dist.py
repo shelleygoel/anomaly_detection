@@ -135,7 +135,7 @@ def flag_anomalies(dist_df, strategy="mad", k=None, model_name=None):
     return scores_df
 
 
-def score_anomalies(dist_df, strategy="mad", model_name=None):
+def score_anomalies(dist_df, day_agg="mean", strategy="mad", model_name=None):
     """
     Compute continuous anomaly scores per (container, day) using pairwise distances.
 
@@ -145,6 +145,7 @@ def score_anomalies(dist_df, strategy="mad", model_name=None):
     Args:
         dist_df: DataFrame from compute_pairwise_distances or compute_pairwise_correlations
                  (columns: container_id, timestamp_et, pair, distance)
+        day_agg: "mean" or "max" aggregation for daily distance per pair
         strategy: "mad" or "iqr"
         model_name: optional model label (default: "euclidean_distance_{strategy}")
 
@@ -154,14 +155,16 @@ def score_anomalies(dist_df, strategy="mad", model_name=None):
     """
     if strategy not in ("mad", "iqr"):
         raise ValueError(f"Unknown strategy: {strategy!r}. Use 'mad' or 'iqr'.")
+    if day_agg not in ("mean", "max"):
+        raise ValueError(f"Unknown day_agg: {day_agg!r}. Use 'mean' or 'max'.")
 
     dist_df = dist_df.copy()
     dist_df["day"] = dist_df["timestamp_et"].dt.date
 
-    # Step 1: day-level mean distance per pair for ALL containers
+    # Step 1: day-level aggregation (mean or max) of distance per pair for ALL containers
     day_pair_all = (
         dist_df.groupby(["container_id", "pair", "day"])["distance"]
-        .mean()
+        .agg(day_agg)
         .reset_index(name="day_dist")
     )
 
@@ -190,3 +193,55 @@ def score_anomalies(dist_df, strategy="mad", model_name=None):
         model_name = f"euclidean_distance_{strategy}"
     result["model"] = model_name
     return result[["container_id", "day", "anomaly_score", "model"]]
+
+
+def score_anomalies_ts(dist_df, strategy="mad", model_name=None):
+    """
+    Compute continuous anomaly scores per (container, timestamp) using pairwise distances.
+
+    Unlike score_anomalies() which aggregates to day-level first, this preserves
+    timestamp-level resolution so short-duration anomalies aren't diluted.
+
+    Args:
+        dist_df: DataFrame from compute_pairwise_distances or compute_pairwise_correlations
+                 (columns: container_id, timestamp_et, pair, distance)
+        strategy: "mad" or "iqr"
+        model_name: optional model label (default: "euclidean_distance_ts_{strategy}")
+
+    Returns:
+        DataFrame with columns [container_id, timestamp_et, anomaly_score, model]
+        One row per (container, timestamp).
+    """
+    if strategy not in ("mad", "iqr"):
+        raise ValueError(f"Unknown strategy: {strategy!r}. Use 'mad' or 'iqr'.")
+
+    # Drop NaN distances (rolling window warmup)
+    clean = dist_df.dropna(subset=["distance"])
+
+    # Max across pairs per (container, timestamp) → single distance per timestamp
+    container_dist = (
+        clean.groupby(["container_id", "timestamp_et"])["distance"]
+        .max()
+        .reset_index(name="container_dist")
+    )
+
+    # Baseline from global pool (all containers, all timestamps)
+    pool = container_dist["container_dist"]
+
+    if strategy == "mad":
+        median = pool.median()
+        mad = (pool - median).abs().median()
+        scale = mad * 1.4826 if mad > 0 else 1.0
+        container_dist["anomaly_score"] = (container_dist["container_dist"] - median) / scale
+    else:  # iqr
+        q1 = pool.quantile(0.25)
+        q3 = pool.quantile(0.75)
+        iqr = q3 - q1
+        scale = iqr if iqr > 0 else 1.0
+        container_dist["anomaly_score"] = (container_dist["container_dist"] - q3) / scale
+
+    if model_name is None:
+        model_name = f"euclidean_distance_ts_{strategy}"
+    container_dist["model"] = model_name
+
+    return container_dist[["container_id", "timestamp_et", "anomaly_score", "model"]]
