@@ -56,8 +56,7 @@ Output: time-series CSVs + labels.csv + metadata.csv — your "test suite."
 
 ### Smoke Test Baseline (`src/baselines.py`)
 - `random_scorer(system_ids)` → random scores
-- `threshold_scorer(system_ids, sensor, threshold)` → z-score or simple threshold
-- PCA reconstruction error (optional, only if quick)
+- `threshold_scorer(system_ids, sensor, threshold)` → z-score or sim PCA reconstruction error (optional, only if quick)
 
 ### Validation Checklist
 Run baselines through evaluation and confirm:

@@ -103,7 +103,7 @@ def compute_pairwise_correlations(df, smooth_window=10, corr_window=60):
                 "container_id": container_id,
                 "timestamp_et": pivot.index,
                 "pair": f"{i}_{j}",
-                "distance": (1 - corr).values,
+                "distance": corr.values,
             })
             results.append(pair_df)
 
