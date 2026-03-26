@@ -99,30 +99,40 @@ model = AnomalyModel.from_scores_df(scores_df, col_map=dataset.col_map,
 
 ## Component 3: `Evaluation` — `core/evaluation.py`
 
-Joins labels + scores, computes metrics, plots curves.
+Joins day-level scores with day-level labels, computes metrics, plots curves.
+`__init__` only stores `level`; methods take `scores` and `dataset` as inputs.
+Anomaly types auto-detected from `dataset`'s `label_type` column.
 
 ```python
 class Evaluation:
-    def __init__(self, dataset, model, level='day'):
-        # Merges dataset.day_labels() or ts_labels() with model scores
+    def __init__(self, level: str = "day"):
+        self.level = level
 
-    def auc_pr(self, anomaly_type=None) -> float
-    def auc_roc(self, anomaly_type=None) -> float
+    def auc_pr(self, scores: TimeSeriesDataset, dataset: TimeSeriesDataset,
+               anomaly_type: str | None = None) -> float
 
-    def metrics_table(self, anomaly_types=None) -> pd.DataFrame:
-        # Returns [anomaly_type, auc_pr, auc_roc] per type
+    def auc_roc(self, scores: TimeSeriesDataset, dataset: TimeSeriesDataset,
+                anomaly_type: str | None = None) -> float
 
-    def plot_pr_curve(self, anomaly_types=None) -> go.Figure:
+    def metrics_table(self, scores: TimeSeriesDataset, dataset: TimeSeriesDataset,
+                      anomaly_types: list[str] | None = None) -> pd.DataFrame:
+        # Returns [anomaly_type, auc_pr, auc_roc] per type + overall row
+
+    def plot_pr_curve(self, scores: TimeSeriesDataset, dataset: TimeSeriesDataset,
+                      model_name: str, anomaly_types: list[str] | None = None) -> go.Figure:
         # PR curve subplots, one per anomaly type, with AUC annotation
 
-    def plot_roc_curve(self, anomaly_types=None) -> go.Figure
+    def plot_roc_curve(self, scores: TimeSeriesDataset, dataset: TimeSeriesDataset,
+                       model_name: str, anomaly_types: list[str] | None = None) -> go.Figure
 
     @staticmethod
-    def compare(evaluations: list) -> pd.DataFrame:
-        # Multi-model comparison table: rows=anomaly_type, cols=model_name
+    def compare(scores_dict: dict[str, TimeSeriesDataset],
+                dataset: TimeSeriesDataset, level: str = "day") -> pd.DataFrame:
+        # Multi-model comparison table: rows=anomaly_type, cols=model metrics
 
     @staticmethod
-    def plot_pr_curves_compared(evaluations: list) -> go.Figure:
+    def plot_pr_curves_compared(scores_dict: dict[str, TimeSeriesDataset],
+                                dataset: TimeSeriesDataset, level: str = "day") -> go.Figure:
         # Overlay PR curves from multiple models, color-coded by model
 ```
 
