@@ -286,7 +286,7 @@ def plot_combined_accuracy(perf_scores_n_c: pd.Series, highlight_features: list 
     fig.add_trace(go.Scatter(
         x=highlighted.index, y=highlighted['score'], mode='markers',
         marker=dict(size=10, color='red', symbol='diamond'),
-        text=highlighted['feature'], hoverinfo='text+y', name='Highlighted'
+        text=highlighted['feature'], hoverinfo='text+y', name='Catch22'
     ))
 
     fig.update_layout(
