@@ -120,8 +120,8 @@ class Evaluation:
         fig.update_yaxes(title_text="Precision", range=[0, 1], col=1)
         fig.update_layout(
             title_text=f"PR Curves — {model_name}",
-            height=400,
-            width=400 * len(anomaly_types),
+            height=600,
+            width=600 * len(anomaly_types),
         )
         return fig
 
@@ -176,8 +176,8 @@ class Evaluation:
         fig.update_yaxes(title_text="TPR", range=[0, 1], col=1)
         fig.update_layout(
             title_text=f"ROC Curves — {model_name}",
-            height=400,
-            width=400 * len(anomaly_types),
+            height=600,
+            width=600 * len(anomaly_types),
         )
         return fig
 
@@ -229,8 +229,8 @@ class Evaluation:
         fig.update_yaxes(title_text="Precision", range=[0, 1], col=1)
         fig.update_layout(
             title_text="PR Curves — Model Comparison",
-            height=400,
-            width=400 * len(anomaly_types),
+            height=600,
+            width=600 * len(anomaly_types),
         )
         return fig
 
@@ -239,7 +239,9 @@ class Evaluation:
     def _merge_scores_w_labels(self, scores: TimeSeriesDataset, dataset: TimeSeriesDataset) -> pd.DataFrame:
         entity_col = dataset.col_map["entity"]
         day_labels = dataset.day_labels()
-        return scores.df.merge(day_labels, on=[entity_col, "day"])
+        merged = scores.df.merge(day_labels, on=[entity_col, "day"])
+        # Drop days that couldn't be scored (e.g. pre-history days in MP)
+        return merged.dropna(subset=["anomaly_score"])
 
     def _get_anomaly_types(self, dataset: TimeSeriesDataset) -> list[str]:
         return [t for t in dataset.anomaly_types() if t != "normal"]

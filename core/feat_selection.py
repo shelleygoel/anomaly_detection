@@ -117,6 +117,39 @@ def calc_per_feat_score(
         "dataset_name"
     )
 
+def calc_multi_feat_score(
+    task_df: pd.DataFrame,
+    nfolds: pd.DataFrame,
+    feature_cols: List[str],
+) -> pd.Series:
+    """Fit one classifier on all `feature_cols` jointly per dataset.
+
+    Returns balanced-accuracy per dataset. Mirrors `calc_per_feat_score` but
+    passes the full feature matrix to a single tree instead of scoring each
+    feature independently.
+    """
+    from tqdm import tqdm
+    from tqdm_joblib import tqdm_joblib
+
+    datasets = list(task_df.groupby(["dataset_name"]))
+
+    def _score_dataset(dname, data):
+        n_cv = nfolds.loc[nfolds["dataset_name"] == dname, "nfolds"].values[0]
+        cv = StratifiedKFold(n_splits=n_cv, shuffle=True, random_state=23)
+        X = data[feature_cols]
+        y = data["label"]
+        clf = tree.DecisionTreeClassifier(class_weight="balanced", random_state=23)
+        return dname, cross_val_score(
+            clf, X, y, cv=cv, scoring=make_scorer(balanced_accuracy_score)
+        ).mean()
+
+    with tqdm_joblib(tqdm(desc="datasets", total=len(datasets))):
+        results = Parallel(n_jobs=-1)(
+            delayed(_score_dataset)(dname, data) for (dname,), data in datasets
+        )
+    return pd.Series(dict(results), name="score").rename_axis("dataset_name")
+
+
 def normalize_and_combine_perf_scores(perf_scores: pd.DataFrame) -> tuple:
     perf_scores_n = perf_scores.div(perf_scores.mean(axis=1), axis=0)
     perf_scores_n_c = perf_scores_n.mean()

@@ -1,8 +1,7 @@
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
+
+from core.viz import PlotConfig
 
 
 class TimeSeriesDataset:
@@ -16,6 +15,48 @@ class TimeSeriesDataset:
         self.df = df
         self.col_map = col_map
         self._validate()
+
+    def to_plot_cfg(self) -> PlotConfig:
+        """Build a PlotConfig from this dataset's col_map for use with core.viz.plot_cases."""
+        return PlotConfig(
+            df=self.df,
+            entity_col=self.col_map["entity"],
+            time_col=self.col_map["time"],
+            value_cols=self.col_map["value_cols"],
+            label_col=self.col_map.get("label"),
+            sub_entity_col=self.col_map.get("sub_entity"),
+            label_type_col=self.col_map.get("label_type"),
+        )
+
+    def sample_entities(
+        self,
+        n_cases: int = 1,
+        label_type: str | None = None,
+        random_state: int | None = None,
+    ) -> np.ndarray:
+        """Return up to n_cases entity IDs, optionally filtered by dominant label_type.
+
+        Args:
+            n_cases: Maximum number of entity IDs to return.
+            label_type: If set, only entities whose dominant label_type matches are considered.
+                Requires 'label_type' in col_map.
+            random_state: Optional seed for reproducibility.
+
+        Returns:
+            Array of sampled entity IDs.
+        """
+        entity_col = self.col_map["entity"]
+        candidates = self.df[entity_col].unique()
+
+        if label_type is not None:
+            self._require("label_type")
+            label_type_col = self.col_map["label_type"]
+            mask = self.df[label_type_col] == label_type
+            candidates = self.df.loc[mask, entity_col].unique()
+
+        n = min(n_cases, len(candidates))
+        rng = np.random.default_rng(random_state)
+        return rng.choice(candidates, size=n, replace=False)
 
     def _validate(self):
         missing = self.REQUIRED_KEYS - set(self.col_map)
@@ -59,7 +100,7 @@ class TimeSeriesDataset:
                 return "normal"
             return non_normal.mode().iloc[0]
 
-        entity_types = self.df.groupby(entity_col).apply(_dominant_type)
+        entity_types = self.df.groupby(entity_col).apply(_dominant_type, include_groups=False)
         summary = entity_types.value_counts().reset_index()
         summary.columns = ["label_type", "entity_count"]
         return summary
@@ -74,6 +115,7 @@ class TimeSeriesDataset:
             else:
                 result[label_type_col] = grp.loc[grp[label_col].idxmax(), label_type_col]
         return pd.Series(result)
+
     def day_labels(self) -> pd.DataFrame:
         """Aggregate labels to entity-day level. Returns [entity, 'day', 'label', 'label_type']."""
         self._require("label")
@@ -90,7 +132,9 @@ class TimeSeriesDataset:
         def agg_fn(grp):
             return self._agg_labels_fn(grp, label_col, label_type_col)
 
-        out = df.groupby(group_cols, sort=False).apply(agg_fn).reset_index()
+        out = df.groupby(group_cols, sort=False, group_keys=False).apply(
+            agg_fn, include_groups=False
+        ).reset_index()
         return out
 
     def ts_labels(self) -> pd.DataFrame:
@@ -108,7 +152,9 @@ class TimeSeriesDataset:
             def agg_fn(grp):
                 return self._agg_labels_fn(grp, label_col, label_type_col)
 
-            out = self.df.groupby(group_cols, sort=False).apply(agg_fn).reset_index()
+            out = self.df.groupby(group_cols, sort=False).apply(
+                agg_fn, include_groups=False
+            ).reset_index()
         else:
             # No sub_entity — just select relevant columns
             cols = [entity_col, time_col, label_col]
@@ -117,212 +163,3 @@ class TimeSeriesDataset:
             out = self.df[cols].copy()
 
         return out
-
-    def sample_and_visualize_cases(
-        self, n_cases: int = 1, entity_ids=None, label_type: str = None
-    ) -> list[go.Figure]:
-        """Generic visualization: one figure per entity, one subplot row per value_col.
-
-        Returns a list of Plotly figures (one per sampled entity).
-        """
-        entity_col = self.col_map["entity"]
-        time_col = self.col_map["time"]
-        value_cols = self.col_map["value_cols"]
-        has_label = "label" in self.col_map
-        has_sub_entity = "sub_entity" in self.col_map
-        sub_entity_col = self.col_map.get("sub_entity")
-        colors = px.colors.qualitative.Plotly
-
-        sampled = self._get_sampled_entities(n_cases, entity_ids, label_type)
-
-        # Build color map for sub_entities if applicable
-        sub_colors = {}
-        if has_sub_entity:
-            all_sub = sorted(self.df[sub_entity_col].unique())
-            sub_colors = {s: colors[i % len(colors)] for i, s in enumerate(all_sub)}
-
-        n_rows = len(value_cols)
-        figures = []
-
-        for eid in sampled:
-            df_e = self.df[self.df[entity_col] == eid].sort_values(time_col)
-            entity_label_type = self._get_entity_label_type(df_e)
-            title = f"Entity {eid} — {entity_label_type.capitalize()} Anomaly"
-
-            fig = make_subplots(
-                rows=n_rows,
-                cols=1,
-                subplot_titles=[vcol for vcol in value_cols],
-                specs=[[{"secondary_y": True}] for _ in range(n_rows)],
-                shared_xaxes=True,
-                vertical_spacing=max(0.05, 0.3 / n_rows),
-            )
-
-            for row_idx, vcol in enumerate(value_cols, start=1):
-                self._add_value_traces_single(
-                    fig, df_e, row_idx, vcol, has_sub_entity, sub_colors
-                )
-                if has_label:
-                    self._add_anomaly_traces(
-                        fig, df_e, row_idx, has_sub_entity, sub_colors
-                    )
-
-                fig.update_yaxes(title_text=vcol, row=row_idx, secondary_y=False)
-                if has_label:
-                    fig.update_yaxes(
-                        title_text="Anomaly Flag",
-                        row=row_idx,
-                        secondary_y=True,
-                        range=[-0.1, 1.1],
-                    )
-                fig.update_xaxes(title_text="Timestamp", row=row_idx)
-
-            fig.update_layout(
-                title_text=title,
-                hovermode="x unified",
-                height=300 * n_rows,
-            )
-            figures.append(fig)
-
-        return figures
-    
-    def _get_sampled_entities(self, n_cases: int, entity_ids, label_type: str):
-
-        """Select entities to visualize."""
-        entity_col = self.col_map["entity"]
-        label_type_col = self.col_map.get("label_type")
-
-        if entity_ids is not None:
-            return np.asarray(entity_ids)
-
-        candidates = self.df[entity_col].unique()
-        if label_type is not None and label_type_col is not None:
-            mask = self.df[label_type_col] == label_type
-            candidates = self.df.loc[mask, entity_col].unique()
-
-        n = min(n_cases, len(candidates))
-        return np.random.choice(candidates, size=n, replace=False)
-
-    def _get_entity_label_type(self, df_e) -> str:
-        """Return the most frequent non-normal label_type for an entity, or 'normal'."""
-        label_type_col = self.col_map.get("label_type")
-        if label_type_col is None:
-            return "normal"
-        non_normal = df_e[df_e[label_type_col] != "normal"][label_type_col]
-        if non_normal.empty:
-            return "normal"
-        return non_normal.mode().iloc[0]
-
-    def _add_value_traces_single(self, fig, df_e, row_idx, vcol, has_sub_entity, sub_colors):
-        """Add traces for a single value column on one subplot row."""
-        time_col = self.col_map["time"]
-        sub_entity_col = self.col_map.get("sub_entity")
-        colors = px.colors.qualitative.Plotly
-
-        if has_sub_entity:
-            for sub in sorted(df_e[sub_entity_col].unique()):
-                sub_data = df_e[df_e[sub_entity_col] == sub]
-                color = sub_colors[sub]
-                fig.add_trace(
-                    go.Scatter(
-                        x=sub_data[time_col],
-                        y=sub_data[vcol],
-                        name=f"{sub_entity_col} {sub}",
-                        mode="lines",
-                        line=dict(color=color),
-                        showlegend=(row_idx == 1),
-                        legendgroup=f"sub_{sub}",
-                    ),
-                    row=row_idx,
-                    col=1,
-                    secondary_y=False,
-                )
-        else:
-            fig.add_trace(
-                go.Scatter(
-                    x=df_e[time_col],
-                    y=df_e[vcol],
-                    name=vcol,
-                    mode="lines",
-                    line=dict(color=colors[(row_idx - 1) % len(colors)]),
-                    showlegend=(row_idx == 1),
-                    legendgroup=f"val_{vcol}",
-                ),
-                row=row_idx,
-                col=1,
-                secondary_y=False,
-            )
-
-    def _add_anomaly_traces(self, fig, df_e, row_idx, has_sub_entity, sub_colors):
-        """Add anomaly marker traces."""
-        time_col = self.col_map["time"]
-        label_col = self.col_map.get("label")
-        sub_entity_col = self.col_map.get("sub_entity")
-
-        if label_col is None:
-            return
-
-        if has_sub_entity:
-            # Determine if anomaly is unit-level or global
-            anomaly_data = df_e[df_e[label_col].astype(bool)]
-            if len(anomaly_data) > 0:
-                is_unit_level = (
-                    anomaly_data.groupby(time_col)[label_col].nunique().max() > 1
-                    or anomaly_data[sub_entity_col].nunique()
-                    < df_e[sub_entity_col].nunique()
-                )
-            else:
-                is_unit_level = False
-
-            if is_unit_level:
-                for sub in sorted(df_e[sub_entity_col].unique()):
-                    sub_anom = df_e[
-                        (df_e[sub_entity_col] == sub)
-                        & df_e[label_col].astype(bool)
-                    ]
-                    fig.add_trace(
-                        go.Scatter(
-                            x=sub_anom[time_col],
-                            y=sub_anom[label_col].astype(int),
-                            name=f"Anomaly — {sub_entity_col} {sub}",
-                            mode="markers",
-                            marker=dict(size=5, color=sub_colors[sub]),
-                            showlegend=(len(sub_anom) > 0 and row_idx == 1),
-                            legendgroup=f"anom_sub_{sub}",
-                        ),
-                        row=row_idx,
-                        col=1,
-                        secondary_y=True,
-                    )
-            else:
-                anom_pts = df_e[df_e[label_col].astype(bool)]
-                fig.add_trace(
-                    go.Scatter(
-                        x=anom_pts[time_col],
-                        y=anom_pts[label_col].astype(int),
-                        name="Anomaly Flag",
-                        mode="markers",
-                        marker=dict(size=3, color="red"),
-                        showlegend=(len(anom_pts) > 0 and row_idx == 1),
-                        legendgroup="anomaly_flag",
-                    ),
-                    row=row_idx,
-                    col=1,
-                    secondary_y=True,
-                )
-        else:
-            anom_pts = df_e[df_e[label_col].astype(bool)]
-            fig.add_trace(
-                go.Scatter(
-                    x=anom_pts[time_col],
-                    y=anom_pts[label_col].astype(int),
-                    name="Anomaly Flag",
-                    mode="markers",
-                    marker=dict(size=3, color="red"),
-                    showlegend=(len(anom_pts) > 0 and row_idx == 1),
-                    legendgroup="anomaly_flag",
-                ),
-                row=row_idx,
-                col=1,
-                secondary_y=True,
-            )
