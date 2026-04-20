@@ -6,6 +6,7 @@ and plots PR/ROC curves broken down by anomaly type.
 
 from concurrent.futures import ThreadPoolExecutor
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -211,6 +212,40 @@ class Evaluation:
 
         return pd.concat(metric_tables, axis=1).reset_index()
 
+    def false_positives(
+        self,
+        scores: TimeSeriesDataset,
+        dataset: TimeSeriesDataset,
+        threshold: float,
+        top_k: int | None = None,
+    ) -> pd.DataFrame:
+        """Day-level false positives at a given score threshold.
+
+        Returns rows where the day's ground-truth label is normal but the
+        model's anomaly_score is >= threshold, sorted by anomaly_score desc.
+
+        Args:
+            scores: Day-level scored TimeSeriesDataset (value_cols=['anomaly_score']).
+            dataset: Labeled dataset used to look up label / label_type per day.
+            threshold: Score cutoff — rows with anomaly_score >= threshold are
+                treated as predicted anomalies.
+            top_k: If set, cap output at the top_k highest-scoring false positives.
+
+        Returns:
+            DataFrame with columns [entity, 'day', 'anomaly_score', label_type].
+        """
+        entity_col = dataset.col_map["entity"]
+        label_col = dataset.col_map["label"]
+        label_type_col = dataset.col_map["label_type"]
+
+        merged = self._merge_scores_w_labels(scores, dataset)
+        fp = merged[
+            (merged[label_col] == 0) & (merged["anomaly_score"] >= threshold)
+        ].sort_values("anomaly_score", ascending=False)
+        if top_k is not None:
+            fp = fp.head(top_k)
+        return fp[[entity_col, "day", "anomaly_score", label_type_col]].reset_index(drop=True)
+
     def plot_pr_curves_compared(
         self,
         scores_dict: dict[str, TimeSeriesDataset],
@@ -294,9 +329,13 @@ class Evaluation:
             if binary_labels.sum() == 0:
                 out.append(None)
                 continue
-            prec, rec, _ = precision_recall_curve(binary_labels, scores_atype["anomaly_score"])
+            prec, rec, thr = precision_recall_curve(binary_labels, scores_atype["anomaly_score"])
+            thr_padded = np.concatenate([thr, [np.nan]])
             ap = average_precision_score(binary_labels, scores_atype["anomaly_score"])
-            out.append({"prec": prec, "rec": rec, "ap": ap, "baseline": binary_labels.mean()})
+            out.append({
+                "prec": prec, "rec": rec, "thresholds": thr_padded,
+                "ap": ap, "baseline": binary_labels.mean(),
+            })
         return out
 
     def _render_pr_traces(
@@ -320,6 +359,13 @@ class Evaluation:
                 name=f"{model_name} (AP={data['ap']:.3f})",
                 legendgroup=model_name,
                 showlegend=(showlegend and col == 1),
+                customdata=data["thresholds"],
+                hovertemplate=(
+                    f"<b>{model_name}</b><br>"
+                    "Recall: %{x:.3f}<br>"
+                    "Precision: %{y:.3f}<br>"
+                    "Threshold: %{customdata:.4f}<extra></extra>"
+                ),
             )
             if color is not None:
                 trace_kwargs["line"] = dict(color=color)
@@ -347,9 +393,13 @@ class Evaluation:
             if binary_labels.sum() == 0:
                 pr_data.append(None)
                 continue
-            prec, rec, _ = precision_recall_curve(binary_labels, scores_atype["anomaly_score"])
+            prec, rec, thr = precision_recall_curve(binary_labels, scores_atype["anomaly_score"])
+            thr_padded = np.concatenate([thr, [np.nan]])
             ap = average_precision_score(binary_labels, scores_atype["anomaly_score"])
-            pr_data.append({"prec": prec, "rec": rec, "ap": ap, "baseline": binary_labels.mean()})
+            pr_data.append({
+                "prec": prec, "rec": rec, "thresholds": thr_padded,
+                "ap": ap, "baseline": binary_labels.mean(),
+            })
         self._render_pr_traces(
             fig, pr_data, anomaly_types, model_name,
             color=color, show_baseline=show_baseline, showlegend=showlegend,

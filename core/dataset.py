@@ -51,8 +51,17 @@ class TimeSeriesDataset:
         if label_type is not None:
             self._require("label_type")
             label_type_col = self.col_map["label_type"]
-            mask = self.df[label_type_col] == label_type
-            candidates = self.df.loc[mask, entity_col].unique()
+            if label_type == "normal":
+                # Only entities whose rows are *entirely* normal.
+                per_entity_all_normal = (
+                    self.df.assign(_is_normal=self.df[label_type_col] == "normal")
+                    .groupby(entity_col)["_is_normal"]
+                    .all()
+                )
+                candidates = per_entity_all_normal[per_entity_all_normal].index.to_numpy()
+            else:
+                mask = self.df[label_type_col] == label_type
+                candidates = self.df.loc[mask, entity_col].unique()
 
         n = min(n_cases, len(candidates))
         rng = np.random.default_rng(random_state)
