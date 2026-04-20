@@ -17,7 +17,48 @@ from core.dataset import TimeSeriesDataset
 
 class FeatureCategory(str, Enum):
     C22_RAW = "c22_raw"
-    C22_DIFF = "c22_diff"
+    C22_RAW_DIFF = "c22_raw_diff"
+    C22_FEAT_DIFF = "c22_feat_diff"
+
+
+class C22Feature(str, Enum):
+    """Catch22 feature identifiers with human-readable descriptions.
+
+    Each member's value is the exact `pycatch22` function name. Because members
+    subclass `str`, they can be passed directly to
+    `FeatureTransformer(c22_features=[C22Feature.CO_f1ecac, ...])`.
+
+    Access the description via `C22Feature.CO_f1ecac.description`.
+    """
+
+    def __new__(cls, name: str, description: str):
+        obj = str.__new__(cls, name)
+        obj._value_ = name
+        obj.description = description
+        return obj
+
+    DN_HistogramMode_5                       = ("DN_HistogramMode_5", "Mode of z-scored distribution (5-bin histogram)")
+    DN_HistogramMode_10                      = ("DN_HistogramMode_10", "Mode of z-scored distribution (10-bin histogram)")
+    CO_f1ecac                                = ("CO_f1ecac", "First 1/e crossing of the autocorrelation function")
+    CO_FirstMin_ac                           = ("CO_FirstMin_ac", "First minimum of the autocorrelation function")
+    CO_HistogramAMI_even_2_5                 = ("CO_HistogramAMI_even_2_5", "Automutual information (m=2, τ=5, 5-bin equiprobable)")
+    CO_trev_1_num                            = ("CO_trev_1_num", "Time-reversibility statistic, <(x_{t+1} − x_t)^3>")
+    MD_hrv_classic_pnn40                     = ("MD_hrv_classic_pnn40", "pNN40: proportion of successive differences > 0.04σ")
+    SB_BinaryStats_mean_longstretch1         = ("SB_BinaryStats_mean_longstretch1", "Longest stretch of consecutive values above the mean")
+    SB_TransitionMatrix_3ac_sumdiagcov       = ("SB_TransitionMatrix_3ac_sumdiagcov", "Trace of covariance of 3-letter symbolic transition matrix")
+    PD_PeriodicityWang_th0_01                = ("PD_PeriodicityWang_th0_01", "Wang's periodicity metric (threshold 0.01)")
+    CO_Embed2_Dist_tau_d_expfit_meandiff     = ("CO_Embed2_Dist_tau_d_expfit_meandiff", "Exp-fit residual of successive distances in 2-D time-delay embedding")
+    IN_AutoMutualInfoStats_40_gaussian_fmmi  = ("IN_AutoMutualInfoStats_40_gaussian_fmmi", "First minimum of Gaussian auto-mutual information (up to lag 40)")
+    FC_LocalSimple_mean1_tauresrat           = ("FC_LocalSimple_mean1_tauresrat", "Change in autocorr timescale after mean-1 forecaster residual")
+    DN_OutlierInclude_p_001_mdrmd            = ("DN_OutlierInclude_p_001_mdrmd", "Time-interval statistic for positive outliers above σ")
+    DN_OutlierInclude_n_001_mdrmd            = ("DN_OutlierInclude_n_001_mdrmd", "Time-interval statistic for negative outliers below −σ")
+    SP_Summaries_welch_rect_area_5_1         = ("SP_Summaries_welch_rect_area_5_1", "Total power in the lowest 1/5 of the Welch spectrum")
+    SB_BinaryStats_diff_longstretch0         = ("SB_BinaryStats_diff_longstretch0", "Longest stretch of consecutive incremental decreases")
+    SB_MotifThree_quantile_hh                = ("SB_MotifThree_quantile_hh", "Shannon entropy of 2 successive symbols (3-letter equiprobable alphabet)")
+    SC_FluctAnal_2_rsrangefit_50_1_logi_prop_r1 = ("SC_FluctAnal_2_rsrangefit_50_1_logi_prop_r1", "Proportion of slower-timescale R/S-range fluctuations")
+    SC_FluctAnal_2_dfa_50_1_2_logi_prop_r1   = ("SC_FluctAnal_2_dfa_50_1_2_logi_prop_r1", "Proportion of slower-timescale DFA fluctuations (order-2 polynomial)")
+    SP_Summaries_welch_rect_centroid         = ("SP_Summaries_welch_rect_centroid", "Centroid of the Welch power spectrum")
+    FC_LocalSimple_mean3_stderr              = ("FC_LocalSimple_mean3_stderr", "Std error of residuals from a local mean-3 forecaster")
 
 
 # ---------------------------------------------------------------------------
@@ -26,22 +67,42 @@ class FeatureCategory(str, Enum):
 
 def _rolling_c22(
     series: np.ndarray, window_size: int, stride: int = 1,
+    feature_names: list[str] | None = None,
 ) -> tuple[np.ndarray, list[str]]:
-    """Slide a window over *series* and compute 22 catch22 features per position.
+    """Slide a window over *series* and compute catch22 features per position.
 
     With stride > 1, windows are taken every `stride` positions — reduces
     compute by ~stride× at the cost of temporal resolution.
+
+    If `feature_names` is None, computes all 22 features via `catch22_all`
+    (single C call per window). Otherwise calls each named feature function
+    individually — ~N/22× faster when only N<<22 features are needed.
     """
     n_windows = (len(series) - window_size) // stride + 1
-    features = np.empty((n_windows, 22))
-    names = None
+    n_feats = 22 if feature_names is None else len(feature_names)
+    features = np.empty((n_windows, n_feats))
+
+    if feature_names is None:
+        names: list[str] | None = None
+        for i in range(n_windows):
+            start = i * stride
+            result = pycatch22.catch22_all(series[start : start + window_size])
+            features[i, :] = result["values"]
+            if names is None:
+                names = result["names"]
+        return features, names
+
+    # Subset path: pycatch22's per-feature functions require Python lists.
+    # Coerce Enum members to their plain string values so downstream column
+    # names don't pick up the Enum's repr ("C22Feature.CO_f1ecac").
+    canonical = [f.value if isinstance(f, Enum) else str(f) for f in feature_names]
+    feat_funcs = [getattr(pycatch22, fn) for fn in canonical]
     for i in range(n_windows):
         start = i * stride
-        result = pycatch22.catch22_all(series[start : start + window_size])
-        features[i, :] = result["values"]
-        if names is None:
-            names = result["names"]
-    return features, names
+        window = series[start : start + window_size].tolist()
+        for k, fn in enumerate(feat_funcs):
+            features[i, k] = fn(window)
+    return features, canonical
 
 
 def _process_entity(
@@ -54,6 +115,7 @@ def _process_entity(
     categories: list[FeatureCategory],
     window_size: int,
     stride: int = 1,
+    c22_features: list[str] | None = None,
 ) -> tuple[pd.DataFrame, list[tuple[list[str], FeatureCategory]]]:
     """Compute all c22 features for one entity. Called once per entity by joblib.
 
@@ -85,30 +147,58 @@ def _process_entity(
 
     # --- build named 1-D series to featurize ---
     # Each entry: (column_prefix, values_1d, category)
+    # C22_FEAT_DIFF needs per-sub_entity c22 features as a dependency.
+    need_sub_ent_feats = (
+        FeatureCategory.C22_RAW in categories
+        or FeatureCategory.C22_FEAT_DIFF in categories
+    )
     named_series: list[tuple[str, np.ndarray, FeatureCategory]] = []
+    sub_ent_feat_index: dict[tuple[str, object], int] = {}
     for raw_col, wide_df in wide_per_col.items():
-        if FeatureCategory.C22_RAW in categories:
+        if need_sub_ent_feats:
             for sub_ent in sub_entities:
+                sub_ent_feat_index[(raw_col, sub_ent)] = len(named_series)
                 named_series.append(
                     (f"{raw_col}__{sub_ent}", wide_df[sub_ent].values, FeatureCategory.C22_RAW)
                 )
-        if FeatureCategory.C22_DIFF in categories:
+        if FeatureCategory.C22_RAW_DIFF in categories:
             for a, b in pairs:
                 named_series.append(
-                    (f"{raw_col}__{a}_{b}", wide_df[a].values - wide_df[b].values, FeatureCategory.C22_DIFF)
+                    (f"{raw_col}__{a}_{b}", wide_df[a].values - wide_df[b].values, FeatureCategory.C22_RAW_DIFF)
                 )
 
     # --- rolling c22 on every series, collect columns ---
-    all_feature_arrays = []
+    all_feature_arrays: list[np.ndarray] = []
     all_column_names: list[str] = []
     column_categories: list[tuple[list[str], FeatureCategory]] = []
+    c22_feature_names: list[str] | None = None
 
     for prefix, values, category in named_series:
-        feat_array, c22_names = _rolling_c22(values, window_size, stride)
+        feat_array, c22_names = _rolling_c22(values, window_size, stride, c22_features)
         all_feature_arrays.append(feat_array)
         cols = [f"{prefix}__{n}" for n in c22_names]
         all_column_names.extend(cols)
         column_categories.append((cols, category))
+        c22_feature_names = c22_names
+
+    # --- C22_FEAT_DIFF: z-scored pairwise diff of per-sub_entity c22 features.
+    # Per c22 feature, std is pooled across all (window × sub_entity) values of
+    # this entity so features with different natural scales become comparable.
+    # Result unit: "sigmas of the feature for this entity".
+    if FeatureCategory.C22_FEAT_DIFF in categories:
+        for raw_col in raw_data_columns:
+            stacked = np.stack(
+                [all_feature_arrays[sub_ent_feat_index[(raw_col, se)]] for se in sub_entities]
+            )  # (n_sub_ent, n_windows, n_c22_feats)
+            pooled_std = np.nanstd(stacked, axis=(0, 1)) + 1e-12
+            for a, b in pairs:
+                a_arr = all_feature_arrays[sub_ent_feat_index[(raw_col, a)]]
+                b_arr = all_feature_arrays[sub_ent_feat_index[(raw_col, b)]]
+                diff_arr = (a_arr - b_arr) / pooled_std
+                cols = [f"{raw_col}__featdiff_{a}_{b}__{n}" for n in c22_feature_names]
+                all_feature_arrays.append(diff_arr)
+                all_column_names.extend(cols)
+                column_categories.append((cols, FeatureCategory.C22_FEAT_DIFF))
 
     # --- assemble DataFrame ---
     feature_matrix = np.concatenate(all_feature_arrays, axis=1)
@@ -127,7 +217,14 @@ def _format_feature_label(feat_col: str) -> str:
     if len(parts) != 3:
         return feat_col
     _raw_col, source, c22_name = parts
-    cat = FeatureCategory.C22_DIFF if "_" in str(source) else FeatureCategory.C22_RAW
+    source_str = str(source)
+    if source_str.startswith("featdiff_"):
+        cat = FeatureCategory.C22_FEAT_DIFF
+        source = source_str.removeprefix("featdiff_")
+    elif "_" in source_str:
+        cat = FeatureCategory.C22_RAW_DIFF
+    else:
+        cat = FeatureCategory.C22_RAW
     return f"{cat.value}: {source} / {c22_name}"
 
 
@@ -145,6 +242,9 @@ class FeatureTransformer:
             (4x fewer c22 calls than stride=1, minor loss of temporal resolution
             since adjacent windows at stride=1 are near-duplicates).
         n_jobs: Parallelism across entities (-1 = all cores).
+        c22_features: Subset of catch22 feature names to compute (e.g.
+            ['CO_f1ecac', 'SP_Summaries_welch_rect_centroid']). None = all 22.
+            Each must be an attribute of `pycatch22`; validated at init.
     """
 
     def __init__(
@@ -153,11 +253,17 @@ class FeatureTransformer:
         window_size: int = 720,
         stride: int | None = None,
         n_jobs: int = -1,
+        c22_features: list[str] | None = None,
     ):
         self.raw_data_columns = raw_data_columns
         self.window_size = window_size
         self.stride = stride if stride is not None else max(1, window_size // 4)
         self.n_jobs = n_jobs
+        if c22_features is not None:
+            unknown = [f for f in c22_features if not hasattr(pycatch22, f)]
+            if unknown:
+                raise ValueError(f"Unknown pycatch22 features: {unknown}")
+        self.c22_features = c22_features
         self._feature_map: dict[FeatureCategory, list[str]] | None = None
 
     @property
@@ -200,7 +306,7 @@ class FeatureTransformer:
                     grp, eid,
                     entity_col, time_col, sub_entity_col,
                     self.raw_data_columns, categories, self.window_size,
-                    self.stride,
+                    self.stride, self.c22_features,
                 )
                 for eid, grp in entity_groups
             ),
@@ -208,13 +314,15 @@ class FeatureTransformer:
             desc="FeatureTransformer",
         ))
 
-        # Build feature_map from first entity
+        # Build feature_map from first entity. C22_FEAT_DIFF pulls C22_RAW in
+        # as a dependency, so column_categories may contain categories the user
+        # didn't request — surface them.
         _, first_column_categories = results[0]
-        feature_map: dict[FeatureCategory, list[str]] = {c: [] for c in categories}
+        feature_map: dict[FeatureCategory, list[str]] = {}
         feature_col_names: list[str] = []
         for col_names, category in first_column_categories:
             feature_col_names.extend(col_names)
-            feature_map[category].extend(col_names)
+            feature_map.setdefault(category, []).extend(col_names)
         self._feature_map = feature_map
 
         result_df = pd.concat([df for df, _ in results], ignore_index=True)

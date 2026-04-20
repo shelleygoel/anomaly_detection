@@ -230,9 +230,11 @@ class Catch22MPModel(AnomalyModel):
             grp = grp.sort_values(time_col)
             X = grp[use_cols].values.astype(np.float64)
 
-            # Z-score per feature so no single feature dominates the L2 distance
-            # purely due to having a larger natural scale.
-            X = (X - X.mean(axis=0)) / (X.std(axis=0, ddof=0) + 1e-12)
+            # Min-max scale per feature to [0, 1] so no single feature dominates
+            # the L2 distance purely due to having a larger natural scale.
+            X_min = X.min(axis=0)
+            X_max = X.max(axis=0)
+            X = (X - X_min) / (X_max - X_min + 1e-12)
 
             if weight_arr is not None:
                 X = X * (weight_arr / weight_arr.sum())
@@ -289,12 +291,13 @@ class Catch22MPModel(AnomalyModel):
             _mp_mean="mean", _mp_std="std"
         )
         df = df.join(grp_stats, on=entity_col)
-        safe_std = df["_mp_std"].where(df["_mp_std"] > 0, 1.0)
-        df["anomaly_score"] = np.where(
-            df["_mp_std"] > 0,
-            (df["left_c22_mp"] - df["_mp_mean"]) / safe_std,
-            0.0,
-        )
+        df["anomaly_score"] = df["left_c22_mp"]
+        # safe_std = df["_mp_std"].where(df["_mp_std"] > 0, 1.0)
+        # df["anomaly_score"] = np.where(
+        #     df["_mp_std"] > 0,
+        #     (df["left_c22_mp"] - df["_mp_mean"]) / safe_std,
+        #     0.0,
+        # )
         df = df.drop(columns=["_mp_mean", "_mp_std"])
 
         if level == "timestamp":

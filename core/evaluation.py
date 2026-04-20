@@ -4,6 +4,8 @@ Joins day-level scores with day-level labels, computes AUC-PR/ROC metrics,
 and plots PR/ROC curves broken down by anomaly type.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -185,11 +187,22 @@ class Evaluation:
         self,
         scores_dict: dict[str, TimeSeriesDataset],
         dataset: TimeSeriesDataset,
+        max_workers: int | None = None,
     ) -> pd.DataFrame:
-        """Multi-model comparison table. Rows=anomaly_type, columns per model."""
+        """Multi-model comparison table. Rows=anomaly_type, columns per model.
+
+        Runs `metrics_table` per model in parallel via a thread pool (sklearn
+        AUC computations release the GIL).
+        """
+        model_names = list(scores_dict.keys())
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            tables = list(pool.map(
+                lambda name: self.metrics_table(scores_dict[name], dataset),
+                model_names,
+            ))
+
         metric_tables = []
-        for model_name, scores in scores_dict.items():
-            table = self.metrics_table(scores, dataset)
+        for model_name, table in zip(model_names, tables):
             table = table.rename(columns={
                 "auc_pr": f"{model_name}_auc_pr",
                 "auc_roc": f"{model_name}_auc_roc",
@@ -202,8 +215,13 @@ class Evaluation:
         self,
         scores_dict: dict[str, TimeSeriesDataset],
         dataset: TimeSeriesDataset,
+        max_workers: int | None = None,
     ) -> go.Figure:
-        """Overlay PR curves from multiple models. One subplot per anomaly type."""
+        """Overlay PR curves from multiple models. One subplot per anomaly type.
+
+        Per-model merge + PR/AP computation runs in parallel; figure mutation
+        stays on the main thread.
+        """
         anomaly_types = self._get_anomaly_types(dataset)
         label_type_col = dataset.col_map["label_type"]
         colors = ["#5470C6", "#EE6666", "#5DBCD2", "#FAC858", "#91CC75"]
@@ -215,14 +233,21 @@ class Evaluation:
             shared_yaxes=True,
         )
 
-        for model_idx, (model_name, scores) in enumerate(scores_dict.items()):
-            labeled_scores = self._merge_scores_w_labels(scores, dataset)
+        model_names = list(scores_dict.keys())
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            pr_data_per_model = list(pool.map(
+                lambda name: self._compute_pr_data(
+                    scores_dict[name], dataset, anomaly_types, label_type_col,
+                ),
+                model_names,
+            ))
+
+        for model_idx, (model_name, pr_data) in enumerate(zip(model_names, pr_data_per_model)):
             color = colors[model_idx % len(colors)]
             show_baseline = (model_idx == 0)
-
-            self._add_pr_traces(
-                fig, labeled_scores, label_type_col, anomaly_types,
-                model_name, color=color, show_baseline=show_baseline,
+            self._render_pr_traces(
+                fig, pr_data, anomaly_types, model_name,
+                color=color, show_baseline=show_baseline,
             )
 
         fig.update_xaxes(title_text="Recall", range=[0, 1])
@@ -254,6 +279,56 @@ class Evaluation:
         binary_labels = (subset_df[label_type_col] == anomaly_type).astype(int)
         return subset_df, binary_labels
 
+    def _compute_pr_data(
+        self,
+        scores: TimeSeriesDataset,
+        dataset: TimeSeriesDataset,
+        anomaly_types: list[str],
+        label_type_col: str,
+    ) -> list[dict | None]:
+        """Thread-safe: merge + PR/AP per anomaly type. No figure mutation."""
+        labeled_scores = self._merge_scores_w_labels(scores, dataset)
+        out: list[dict | None] = []
+        for atype in anomaly_types:
+            scores_atype, binary_labels = self._filter_by_type(labeled_scores, atype, label_type_col)
+            if binary_labels.sum() == 0:
+                out.append(None)
+                continue
+            prec, rec, _ = precision_recall_curve(binary_labels, scores_atype["anomaly_score"])
+            ap = average_precision_score(binary_labels, scores_atype["anomaly_score"])
+            out.append({"prec": prec, "rec": rec, "ap": ap, "baseline": binary_labels.mean()})
+        return out
+
+    def _render_pr_traces(
+        self,
+        fig: go.Figure,
+        pr_data: list[dict | None],
+        anomaly_types: list[str],
+        model_name: str,
+        color: str | None = None,
+        show_baseline: bool = True,
+        showlegend: bool = True,
+    ) -> None:
+        """Main-thread only: add precomputed PR traces to figure."""
+        for col, (atype, data) in enumerate(zip(anomaly_types, pr_data), 1):
+            if data is None:
+                print(f"No cases found with anomaly type = {atype}")
+                continue
+
+            trace_kwargs = dict(
+                x=data["rec"], y=data["prec"], mode="lines",
+                name=f"{model_name} (AP={data['ap']:.3f})",
+                legendgroup=model_name,
+                showlegend=(showlegend and col == 1),
+            )
+            if color is not None:
+                trace_kwargs["line"] = dict(color=color)
+
+            fig.add_trace(go.Scatter(**trace_kwargs), row=1, col=col)
+
+            if show_baseline:
+                fig.add_hline(y=data["baseline"], line_dash="dot", line_color="gray", row=1, col=col)
+
     def _add_pr_traces(
         self,
         fig: go.Figure,
@@ -265,27 +340,17 @@ class Evaluation:
         show_baseline: bool = True,
         showlegend: bool = True,
     ) -> None:
-        """Add PR curve traces to an existing figure (one trace per anomaly type column)."""
-        for col, atype in enumerate(anomaly_types, 1):
+        """Compute + render PR traces for a single pre-merged labeled_scores frame."""
+        pr_data = []
+        for atype in anomaly_types:
             scores_atype, binary_labels = self._filter_by_type(labeled_scores, atype, label_type_col)
             if binary_labels.sum() == 0:
-                print(f"No cases found with anomaly type = {atype}")
+                pr_data.append(None)
                 continue
-
             prec, rec, _ = precision_recall_curve(binary_labels, scores_atype["anomaly_score"])
             ap = average_precision_score(binary_labels, scores_atype["anomaly_score"])
-
-            trace_kwargs = dict(
-                x=rec, y=prec, mode="lines",
-                name=f"{model_name} (AP={ap:.3f})",
-                legendgroup=model_name,
-                showlegend=(showlegend and col == 1),
-            )
-            if color is not None:
-                trace_kwargs["line"] = dict(color=color)
-
-            fig.add_trace(go.Scatter(**trace_kwargs), row=1, col=col)
-
-            if show_baseline:
-                baseline = binary_labels.mean()
-                fig.add_hline(y=baseline, line_dash="dot", line_color="gray", row=1, col=col)
+            pr_data.append({"prec": prec, "rec": rec, "ap": ap, "baseline": binary_labels.mean()})
+        self._render_pr_traces(
+            fig, pr_data, anomaly_types, model_name,
+            color=color, show_baseline=show_baseline, showlegend=showlegend,
+        )
