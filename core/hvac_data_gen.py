@@ -13,17 +13,23 @@ from tqdm import tqdm
 
 class HVACDataGenerator:
     """Generate synthetic HVAC temperature data for BESS containers"""
-    
+
+    # Generated but discarded from the returned frame — absorbs the start-of-data
+    # cycle-skip artifact where unit-specific time offsets push day-0 cycles
+    # negative. Real deployments see a stationary stream, so this prevents a
+    # synthetic-only boundary effect from contaminating evaluation.
+    BURN_IN_DAYS = 1
+
     def __init__(self, seed: int = 42):
         """
         Initialize the generator
-        
+
         Args:
             seed: Random seed for reproducibility
         """
         np.random.seed(seed)
         random.seed(seed)
-        
+
         # Base parameters for normal operation
         self.base_temp = 50  # Base temperature
         self.temp_range = 15  # Temperature variation range
@@ -365,23 +371,31 @@ class HVACDataGenerator:
                                anomaly_config: List[Dict] = None) -> pd.DataFrame:
         """
         Generate complete data for one BESS container with 3 HVAC units
-        
+
         Args:
             container_id: Container identifier
             start_time: Start datetime
             duration_days: Number of days to simulate
             anomaly_config: List of anomaly configurations
-                           Format: [{'unit': 0, 'type': 'lag', 'start_day': 2, 
+                           Format: [{'unit': 0, 'type': 'lag', 'start_day': 2,
                                     'start_hour': 10, 'duration_hours': 3, 'params': {...}}]
-        
+                           `start_day` is relative to `start_time` (0 = first visible day).
+
         Returns:
-            DataFrame with all units' data
+            DataFrame covering [start_time, start_time + duration_days).
+            An additional BURN_IN_DAYS of data is generated before start_time
+            and discarded before return to avoid start-of-data cycle-skip
+            artifacts.
         """
+        burn_in = self.BURN_IN_DAYS
+        internal_start_time = start_time - timedelta(days=burn_in)
+        internal_duration_days = duration_days + burn_in
+
         # Generate daily baseline offsets once for all units
-        daily_offsets = [np.random.uniform(-3, 3) for _ in range(duration_days)]
+        daily_offsets = [np.random.uniform(-3, 3) for _ in range(internal_duration_days)]
 
         # Generate cycle timings once (shared by all units)
-        cycle_timings = self._generate_cycle_timings(duration_days)
+        cycle_timings = self._generate_cycle_timings(internal_duration_days)
 
         # Generate data for all 3 units with unit-specific time offsets
         all_data = []
@@ -397,16 +411,20 @@ class HVACDataGenerator:
 
             # Generate charge pattern with unit-specific time offset applied to each cycle
             charge_pattern = self.generate_charge_cycles(
-                start_time, duration_days, unit_offset=time_offset, cycle_timings=cycle_timings)
+                internal_start_time, internal_duration_days,
+                unit_offset=time_offset, cycle_timings=cycle_timings)
 
-            df = self.generate_normal_unit(start_time, duration_days, unit_id, charge_pattern, daily_offsets, temp_offset)
+            df = self.generate_normal_unit(
+                internal_start_time, internal_duration_days, unit_id,
+                charge_pattern, daily_offsets, temp_offset)
             df['container_id'] = container_id
             all_data.append(df)
-        
+
         # Combine all units
         combined_df = pd.concat(all_data, ignore_index=True)
-        
-        # Inject anomalies if specified
+
+        # Inject anomalies if specified. User's `start_day` is relative to the
+        # visible start; shift into the internal (burn-in-prefixed) frame.
         if anomaly_config:
             for anomaly in anomaly_config:
                 unit = anomaly['unit']
@@ -416,8 +434,8 @@ class HVACDataGenerator:
                 duration_hours = anomaly.get('duration_hours', 1)
                 params = anomaly.get('params', {})
 
-                # Calculate start minute offset
-                start_minutes = start_day * 24 * 60 + start_hour * 60
+                # Calculate start minute offset in internal frame
+                start_minutes = (start_day + burn_in) * 24 * 60 + start_hour * 60
                 duration_minutes = duration_hours * 60
 
                 # Get indices for the specific unit
@@ -442,7 +460,10 @@ class HVACDataGenerator:
                         freq_mult = params.get('frequency_multiplier', 2.0)
                         combined_df = self.inject_anomaly_frequency(
                             combined_df, unit_indices, start_minutes, duration_minutes, freq_mult)
-        
+
+        # Drop burn-in rows before returning
+        combined_df = combined_df[combined_df['timestamp_et'] >= start_time]
+
         return combined_df.sort_values(['timestamp_et', 'unit']).reset_index(drop=True)
     
     def generate_dataset(self,
