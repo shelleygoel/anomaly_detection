@@ -35,63 +35,53 @@ class Evaluation:
         self,
         scores: TimeSeriesDataset,
         dataset: TimeSeriesDataset,
-        anomaly_type: str | None = None,
+        label_type: str | None = None,
+        label_types: list[str] | None = None,
     ) -> float:
-        labeled_scores = self._merge_scores_w_labels(scores, dataset)
-        label_type_col = dataset.col_map["label_type"]
-
-        if anomaly_type is not None:
-            scores_subset, binary_labels = self._filter_by_type(labeled_scores, anomaly_type, label_type_col)
-        else:
-            # compute global PR -
-            # all anomaly types are weighted equally
-            scores_subset = labeled_scores
-            label_col = dataset.col_map["label"]
-            binary_labels = labeled_scores[label_col].astype(int)
-
+        scores_subset, binary_labels = self._resolve_subset(
+            scores, dataset, label_type, label_types,
+        )
         return average_precision_score(binary_labels, scores_subset["anomaly_score"])
 
     def auc_roc(
         self,
         scores: TimeSeriesDataset,
         dataset: TimeSeriesDataset,
-        anomaly_type: str | None = None,
+        label_type: str | None = None,
+        label_types: list[str] | None = None,
     ) -> float:
-        labeled_scores = self._merge_scores_w_labels(scores, dataset)
-        label_type_col = dataset.col_map["label_type"]
-
-        if anomaly_type is not None:
-            scores_subset, binary_labels = self._filter_by_type(labeled_scores, anomaly_type, label_type_col)
-        else:
-            scores_subset = labeled_scores
-            label_col = dataset.col_map["label"]
-            binary_labels = labeled_scores[label_col].astype(int)
-
+        scores_subset, binary_labels = self._resolve_subset(
+            scores, dataset, label_type, label_types,
+        )
         return roc_auc_score(binary_labels, scores_subset["anomaly_score"])
 
     def metrics_table(
         self,
         scores: TimeSeriesDataset,
         dataset: TimeSeriesDataset,
-        anomaly_types: list[str] | None = None,
+        label_types: list[str] | None = None,
     ) -> pd.DataFrame:
-        """Returns DataFrame with columns [anomaly_type, auc_pr, auc_roc]."""
-        if anomaly_types is None:
-            anomaly_types = self._get_anomaly_types(dataset)
+        """Returns DataFrame with columns [label_type, auc_pr, auc_roc].
+
+        If label_types is given, rows and the 'overall' row are restricted to
+        those types (+ normal).
+        """
+        resolved_types = self._resolve_label_types(dataset, label_types)
+        labeled_scores = self._merge_scores_w_labels(scores, dataset)
+        label_col = dataset.col_map["label"]
+        label_type_col = dataset.col_map["label_type"]
 
         rows = []
-        for atype in anomaly_types:
-            rows.append({
-                "anomaly_type": atype,
-                "auc_pr": self.auc_pr(scores, dataset, anomaly_type=atype),
-                "auc_roc": self.auc_roc(scores, dataset, anomaly_type=atype),
-            })
+        for atype in resolved_types:
+            ap, roc = self._aucs_from_merged(
+                labeled_scores, label_col, label_type_col, label_type=atype,
+            )
+            rows.append({"label_type": atype, "auc_pr": ap, "auc_roc": roc})
 
-        rows.append({
-            "anomaly_type": "overall",
-            "auc_pr": self.auc_pr(scores, dataset),
-            "auc_roc": self.auc_roc(scores, dataset),
-        })
+        ap, roc = self._aucs_from_merged(
+            labeled_scores, label_col, label_type_col, label_types=label_types,
+        )
+        rows.append({"label_type": "overall", "auc_pr": ap, "auc_roc": roc})
 
         return pd.DataFrame(rows)
 
@@ -101,30 +91,29 @@ class Evaluation:
         scores: TimeSeriesDataset,
         dataset: TimeSeriesDataset,
         model_name: str,
-        anomaly_types: list[str] | None = None,
+        label_types: list[str] | None = None,
     ) -> go.Figure:
-        """PR curve subplots — one column per anomaly type."""
-        if anomaly_types is None:
-            anomaly_types = self._get_anomaly_types(dataset)
+        """PR curve subplots — one column per label type."""
+        resolved_types = self._resolve_label_types(dataset, label_types)
 
         labeled_scores = self._merge_scores_w_labels(scores, dataset)
         label_type_col = dataset.col_map["label_type"]
 
         fig = make_subplots(
             rows=1,
-            cols=len(anomaly_types),
-            subplot_titles=[t.capitalize() for t in anomaly_types],
+            cols=len(resolved_types),
+            subplot_titles=[t.capitalize() for t in resolved_types],
             shared_yaxes=True,
         )
 
-        self._add_pr_traces(fig, labeled_scores, label_type_col, anomaly_types, model_name)
+        self._add_pr_traces(fig, labeled_scores, label_type_col, resolved_types, model_name)
 
         fig.update_xaxes(title_text="Recall", range=[0, 1])
         fig.update_yaxes(title_text="Precision", range=[0, 1], col=1)
         fig.update_layout(
             title_text=f"PR Curves — {model_name}",
             height=600,
-            width=600 * len(anomaly_types),
+            width=600 * len(resolved_types),
         )
         return fig
 
@@ -133,23 +122,22 @@ class Evaluation:
         scores: TimeSeriesDataset,
         dataset: TimeSeriesDataset,
         model_name: str,
-        anomaly_types: list[str] | None = None,
+        label_types: list[str] | None = None,
     ) -> go.Figure:
-        """ROC curve subplots — one column per anomaly type."""
-        if anomaly_types is None:
-            anomaly_types = self._get_anomaly_types(dataset)
+        """ROC curve subplots — one column per label type."""
+        resolved_types = self._resolve_label_types(dataset, label_types)
 
         labeled_scores = self._merge_scores_w_labels(scores, dataset)
         label_type_col = dataset.col_map["label_type"]
 
         fig = make_subplots(
             rows=1,
-            cols=len(anomaly_types),
-            subplot_titles=[t.capitalize() for t in anomaly_types],
+            cols=len(resolved_types),
+            subplot_titles=[t.capitalize() for t in resolved_types],
             shared_yaxes=True,
         )
 
-        for col, atype in enumerate(anomaly_types, 1):
+        for col, atype in enumerate(resolved_types, 1):
             scores_atype, binary_labels = self._filter_by_type(labeled_scores, atype, label_type_col)
             if binary_labels.sum() == 0:
                 continue
@@ -180,7 +168,7 @@ class Evaluation:
         fig.update_layout(
             title_text=f"ROC Curves — {model_name}",
             height=600,
-            width=600 * len(anomaly_types),
+            width=600 * len(resolved_types),
         )
         return fig
 
@@ -189,90 +177,152 @@ class Evaluation:
         scores_dict: dict[str, TimeSeriesDataset],
         dataset: TimeSeriesDataset,
         max_workers: int | None = None,
+        label_types: list[str] | None = None,
     ) -> pd.DataFrame:
-        """Multi-model comparison table. Rows=anomaly_type, columns per model.
+        """Multi-model comparison table.
+
+        Returns a DataFrame with a (label_type, metric) MultiIndex on rows and
+        model names as columns. `metric` is 'auc_pr' or 'auc_roc'.
 
         Runs `metrics_table` per model in parallel via a thread pool (sklearn
         AUC computations release the GIL).
         """
         model_names = list(scores_dict.keys())
+        dataset.day_labels()  # prime cache before threads race on it
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             tables = list(pool.map(
-                lambda name: self.metrics_table(scores_dict[name], dataset),
+                lambda name: self.metrics_table(scores_dict[name], dataset, label_types=label_types),
                 model_names,
             ))
 
-        metric_tables = []
+        per_model = []
         for model_name, table in zip(model_names, tables):
-            table = table.rename(columns={
-                "auc_pr": f"{model_name}_auc_pr",
-                "auc_roc": f"{model_name}_auc_roc",
-            })
-            metric_tables.append(table.set_index("anomaly_type"))
+            stacked = table.set_index("label_type")[["auc_pr", "auc_roc"]].stack()
+            stacked.index.names = ["label_type", "metric"]
+            stacked.name = model_name
+            per_model.append(stacked)
 
-        return pd.concat(metric_tables, axis=1).reset_index()
+        return pd.concat(per_model, axis=1)
 
     def false_positives(
         self,
         scores: TimeSeriesDataset,
         dataset: TimeSeriesDataset,
         threshold: float,
+        label_type: str,
+        count_other_labels_as_fp: bool = False,
         top_k: int | None = None,
     ) -> pd.DataFrame:
-        """Day-level false positives at a given score threshold.
-
-        Returns rows where the day's ground-truth label is normal but the
-        model's anomaly_score is >= threshold, sorted by anomaly_score desc.
+        """Day-level false positives for a given anomaly type at a score threshold.
 
         Args:
             scores: Day-level scored TimeSeriesDataset (value_cols=['anomaly_score']).
             dataset: Labeled dataset used to look up label / label_type per day.
             threshold: Score cutoff — rows with anomaly_score >= threshold are
                 treated as predicted anomalies.
+            label_type: Anomaly type being evaluated.
+            count_other_labels_as_fp: Controls how days with *other* anomaly types are
+                treated. If False (default), they are excluded from the universe
+                — matches `auc_pr(label_type=...)` semantics. Use when your
+                deployed pipeline has separate detectors for other types. If
+                True, they count as false positives when the score >= threshold
+                — reflects real-world cost when this is the only detector and
+                other anomaly types are unmodeled (a fire on an amplitude day
+                looks like a false alarm to an operator expecting frequency).
             top_k: If set, cap output at the top_k highest-scoring false positives.
 
         Returns:
             DataFrame with columns [entity, 'day', 'anomaly_score', label_type].
         """
         entity_col = dataset.col_map["entity"]
-        label_col = dataset.col_map["label"]
         label_type_col = dataset.col_map["label_type"]
+        self._resolve_label_types(dataset, [label_type])  # validate
 
         merged = self._merge_scores_w_labels(scores, dataset)
-        fp = merged[
-            (merged[label_col] == 0) & (merged["anomaly_score"] >= threshold)
-        ].sort_values("anomaly_score", ascending=False)
+        if count_other_labels_as_fp:
+            fp = merged[
+                (merged[label_type_col] != label_type)
+                & (merged["anomaly_score"] >= threshold)
+            ]
+        else:
+            subset, _ = self._filter_by_type(merged, label_type, label_type_col)
+            fp = subset[
+                (subset[label_type_col] == "normal")
+                & (subset["anomaly_score"] >= threshold)
+            ]
+        fp = fp.sort_values("anomaly_score", ascending=False)
         if top_k is not None:
             fp = fp.head(top_k)
         return fp[[entity_col, "day", "anomaly_score", label_type_col]].reset_index(drop=True)
+
+    def true_positives(
+        self,
+        scores: TimeSeriesDataset,
+        dataset: TimeSeriesDataset,
+        threshold: float,
+        label_type: str,
+        top_k: int | None = None,
+    ) -> pd.DataFrame:
+        """Day-level true positives for a given anomaly type at a score threshold.
+
+        Returns rows labeled `label_type` with anomaly_score >= threshold,
+        sorted by score desc. Other anomaly types never count as TPs regardless
+        of the FP treatment used elsewhere.
+
+        Args:
+            scores: Day-level scored TimeSeriesDataset (value_cols=['anomaly_score']).
+            dataset: Labeled dataset used to look up label / label_type per day.
+            threshold: Score cutoff — rows with anomaly_score >= threshold are
+                treated as predicted anomalies.
+            label_type: Anomaly type being evaluated. Only days with this type
+                count as true positives.
+            top_k: If set, cap output at the top_k highest-scoring true positives.
+
+        Returns:
+            DataFrame with columns [entity, 'day', 'anomaly_score', label_type].
+        """
+        entity_col = dataset.col_map["entity"]
+        label_type_col = dataset.col_map["label_type"]
+        self._resolve_label_types(dataset, [label_type])  # validate
+
+        merged = self._merge_scores_w_labels(scores, dataset)
+        tp = merged[
+            (merged[label_type_col] == label_type)
+            & (merged["anomaly_score"] >= threshold)
+        ].sort_values("anomaly_score", ascending=False)
+        if top_k is not None:
+            tp = tp.head(top_k)
+        return tp[[entity_col, "day", "anomaly_score", label_type_col]].reset_index(drop=True)
 
     def plot_pr_curves_compared(
         self,
         scores_dict: dict[str, TimeSeriesDataset],
         dataset: TimeSeriesDataset,
         max_workers: int | None = None,
+        label_types: list[str] | None = None,
     ) -> go.Figure:
-        """Overlay PR curves from multiple models. One subplot per anomaly type.
+        """Overlay PR curves from multiple models. One subplot per label type.
 
         Per-model merge + PR/AP computation runs in parallel; figure mutation
         stays on the main thread.
         """
-        anomaly_types = self._get_anomaly_types(dataset)
+        resolved_types = self._resolve_label_types(dataset, label_types)
         label_type_col = dataset.col_map["label_type"]
         colors = ["#5470C6", "#EE6666", "#5DBCD2", "#FAC858", "#91CC75"]
 
         fig = make_subplots(
             rows=1,
-            cols=len(anomaly_types),
-            subplot_titles=[t.capitalize() for t in anomaly_types],
+            cols=len(resolved_types),
+            subplot_titles=[t.capitalize() for t in resolved_types],
             shared_yaxes=True,
         )
 
         model_names = list(scores_dict.keys())
+        dataset.day_labels()  # prime cache before threads race on it
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             pr_data_per_model = list(pool.map(
                 lambda name: self._compute_pr_data(
-                    scores_dict[name], dataset, anomaly_types, label_type_col,
+                    scores_dict[name], dataset, resolved_types, label_type_col,
                 ),
                 model_names,
             ))
@@ -281,7 +331,7 @@ class Evaluation:
             color = colors[model_idx % len(colors)]
             show_baseline = (model_idx == 0)
             self._render_pr_traces(
-                fig, pr_data, anomaly_types, model_name,
+                fig, pr_data, resolved_types, model_name,
                 color=color, show_baseline=show_baseline,
             )
 
@@ -290,7 +340,7 @@ class Evaluation:
         fig.update_layout(
             title_text="PR Curves — Model Comparison",
             height=600,
-            width=600 * len(anomaly_types),
+            width=600 * len(resolved_types),
         )
         return fig
 
@@ -306,12 +356,86 @@ class Evaluation:
     def _get_anomaly_types(self, dataset: TimeSeriesDataset) -> list[str]:
         return [t for t in dataset.anomaly_types() if t != "normal"]
 
+    def _resolve_label_types(
+        self, dataset: TimeSeriesDataset, label_types: list[str] | None,
+    ) -> list[str]:
+        """Validate user-supplied label_types against dataset, or default to all non-normal."""
+        if label_types is None:
+            return self._get_anomaly_types(dataset)
+        if len(label_types) == 0:
+            raise ValueError("label_types must be non-empty (or None for all types)")
+        known = set(dataset.anomaly_types())
+        unknown = [t for t in label_types if t not in known]
+        if unknown:
+            raise ValueError(f"Unknown label_types: {unknown}. Dataset has: {sorted(known)}")
+        return list(label_types)
+
+    def _resolve_subset(
+        self,
+        scores: TimeSeriesDataset,
+        dataset: TimeSeriesDataset,
+        label_type: str | None,
+        label_types: list[str] | None,
+    ) -> tuple[pd.DataFrame, pd.Series]:
+        """Shared filter path for auc_pr/auc_roc: single type, multi-type, or all."""
+        if label_type is not None and label_types is not None:
+            raise ValueError("Pass only one of label_type or label_types, not both")
+
+        labeled_scores = self._merge_scores_w_labels(scores, dataset)
+        label_type_col = dataset.col_map["label_type"]
+
+        if label_type is not None:
+            return self._filter_by_type(labeled_scores, label_type, label_type_col)
+        if label_types is not None:
+            resolved = self._resolve_label_types(dataset, label_types)
+            return self._filter_by_types(labeled_scores, resolved, label_type_col)
+
+        label_col = dataset.col_map["label"]
+        binary_labels = labeled_scores[label_col].astype(int)
+        return labeled_scores, binary_labels
+
+    def _aucs_from_merged(
+        self,
+        labeled_scores: pd.DataFrame,
+        label_col: str,
+        label_type_col: str,
+        label_type: str | None = None,
+        label_types: list[str] | None = None,
+    ) -> tuple[float, float]:
+        """Compute (auc_pr, auc_roc) from a pre-merged labeled_scores frame."""
+        if label_type is not None and label_types is not None:
+            raise ValueError("Pass only one of label_type or label_types, not both")
+
+        if label_type is not None:
+            subset, binary_labels = self._filter_by_type(labeled_scores, label_type, label_type_col)
+        elif label_types is not None:
+            subset, binary_labels = self._filter_by_types(labeled_scores, label_types, label_type_col)
+        else:
+            subset = labeled_scores
+            binary_labels = labeled_scores[label_col].astype(int)
+
+        score_vals = subset["anomaly_score"]
+        return (
+            average_precision_score(binary_labels, score_vals),
+            roc_auc_score(binary_labels, score_vals),
+        )
+
     def _filter_by_type(
         self, labeled_scores: pd.DataFrame, anomaly_type: str, label_type_col: str
     ) -> tuple[pd.DataFrame, pd.Series]:
         mask = labeled_scores[label_type_col].isin([anomaly_type, "normal"])
         subset_df = labeled_scores[mask]
         binary_labels = (subset_df[label_type_col] == anomaly_type).astype(int)
+        return subset_df, binary_labels
+
+    def _filter_by_types(
+        self, labeled_scores: pd.DataFrame, label_types: list[str], label_type_col: str
+    ) -> tuple[pd.DataFrame, pd.Series]:
+        """Filter to rows where label_type ∈ label_types ∪ {'normal'}; label = non-normal."""
+        keep = list(label_types) + ["normal"]
+        mask = labeled_scores[label_type_col].isin(keep)
+        subset_df = labeled_scores[mask]
+        binary_labels = (subset_df[label_type_col] != "normal").astype(int)
         return subset_df, binary_labels
 
     def _compute_pr_data(

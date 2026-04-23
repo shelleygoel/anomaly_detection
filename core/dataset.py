@@ -14,6 +14,7 @@ class TimeSeriesDataset:
     def __init__(self, df: pd.DataFrame, col_map: dict):
         self.df = df
         self.col_map = col_map
+        self._day_labels_cache: pd.DataFrame | None = None
         self._validate()
 
     def to_plot_cfg(self) -> PlotConfig:
@@ -126,7 +127,13 @@ class TimeSeriesDataset:
         return pd.Series(result)
 
     def day_labels(self) -> pd.DataFrame:
-        """Aggregate labels to entity-day level. Returns [entity, 'day', 'label', 'label_type']."""
+        """Aggregate labels to entity-day level. Returns [entity, 'day', 'label', 'label_type'].
+
+        Memoized per instance — callers should not mutate the returned frame.
+        """
+        if self._day_labels_cache is not None:
+            return self._day_labels_cache
+
         self._require("label")
         entity_col = self.col_map["entity"]
         time_col = self.col_map["time"]
@@ -144,6 +151,7 @@ class TimeSeriesDataset:
         out = df.groupby(group_cols, sort=False, group_keys=False).apply(
             agg_fn, include_groups=False
         ).reset_index()
+        self._day_labels_cache = out
         return out
 
     def ts_labels(self) -> pd.DataFrame:
